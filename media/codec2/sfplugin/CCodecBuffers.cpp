@@ -97,7 +97,10 @@ void CCodecBuffers::handleImageData(const sp<Codec2Buffer> &buffer) {
         if (img->mNumPlanes > 0 && img->mType != img->MEDIA_IMAGE_TYPE_UNKNOWN) {
             int32_t stride = img->mPlane[0].mRowInc;
             mFormatWithImageData->setInt32(KEY_STRIDE, stride);
-            ALOGD("[%s] updating stride = %d", mName, stride);
+            mFormatWithImageData->setInt32(KEY_WIDTH, img->mWidth);
+            mFormatWithImageData->setInt32(KEY_HEIGHT, img->mHeight);
+            ALOGD("[%s] updating stride = %d, width: %d, height: %d",
+                  mName, stride, img->mWidth, img->mHeight);
             if (img->mNumPlanes > 1 && stride > 0) {
                 int64_t offsetDelta =
                     (int64_t)img->mPlane[1].mOffset - (int64_t)img->mPlane[0].mOffset;
@@ -551,6 +554,14 @@ size_t FlexBuffersImpl::numComponentBuffers() const {
             });
 }
 
+size_t FlexBuffersImpl::numClientBuffers() const {
+    return std::count_if(
+            mBuffers.begin(), mBuffers.end(),
+            [](const Entry &entry) {
+                return entry.clientBuffer != nullptr;
+            });
+}
+
 // BuffersArrayImpl
 
 void BuffersArrayImpl::initialize(
@@ -697,6 +708,14 @@ size_t BuffersArrayImpl::arraySize() const {
     return mBuffers.size();
 }
 
+size_t BuffersArrayImpl::numClientBuffers() const {
+    return std::count_if(
+            mBuffers.begin(), mBuffers.end(),
+            [](const Entry &entry) {
+                return entry.ownedByClient;
+            });
+}
+
 // InputBuffersArray
 
 void InputBuffersArray::initialize(
@@ -743,6 +762,10 @@ size_t InputBuffersArray::numActiveSlots() const {
     return mImpl.numActiveSlots();
 }
 
+size_t InputBuffersArray::numClientBuffers() const {
+    return mImpl.numClientBuffers();
+}
+
 sp<Codec2Buffer> InputBuffersArray::createNewBuffer() {
     return mAllocate();
 }
@@ -779,6 +802,10 @@ std::unique_ptr<InputBuffers> SlotInputBuffers::toArrayMode(size_t) {
 
 size_t SlotInputBuffers::numActiveSlots() const {
     return mImpl.numActiveSlots();
+}
+
+size_t SlotInputBuffers::numClientBuffers() const {
+    return mImpl.numClientBuffers();
 }
 
 sp<Codec2Buffer> SlotInputBuffers::createNewBuffer() {
@@ -831,6 +858,10 @@ std::unique_ptr<InputBuffers> LinearInputBuffers::toArrayMode(size_t size) {
 
 size_t LinearInputBuffers::numActiveSlots() const {
     return mImpl.numActiveSlots();
+}
+
+size_t LinearInputBuffers::numClientBuffers() const {
+    return mImpl.numClientBuffers();
 }
 
 // static
@@ -1011,6 +1042,10 @@ size_t GraphicMetadataInputBuffers::numActiveSlots() const {
     return mImpl.numActiveSlots();
 }
 
+size_t GraphicMetadataInputBuffers::numClientBuffers() const {
+    return mImpl.numClientBuffers();
+}
+
 sp<Codec2Buffer> GraphicMetadataInputBuffers::createNewBuffer() {
     std::shared_ptr<C2Allocator> alloc;
     c2_status_t err = mStore->fetchAllocator(mPool->getAllocatorId(), &alloc);
@@ -1088,6 +1123,10 @@ std::unique_ptr<InputBuffers> GraphicInputBuffers::toArrayMode(size_t size) {
 
 size_t GraphicInputBuffers::numActiveSlots() const {
     return mImpl.numActiveSlots();
+}
+
+size_t GraphicInputBuffers::numClientBuffers() const {
+    return mImpl.numClientBuffers();
 }
 
 sp<Codec2Buffer> GraphicInputBuffers::createNewBuffer() {
