@@ -17,7 +17,7 @@
 
 // Proxy for media player implementations
 
-//#define LOG_NDEBUG 0
+#define LOG_NDEBUG 0
 #define LOG_TAG "MediaPlayerService"
 #include <utils/Log.h>
 
@@ -2493,6 +2493,9 @@ void MediaPlayerService::AudioOutput::close()
     ALOGV("close");
     sp<AudioTrack> track;
     {
+        if (mTrack != 0) {
+            mTrack->stopAndJoinCallbacks();
+        }
         Mutex::Autolock lock(mLock);
         track = mTrack;
         close_l(); // clears mTrack

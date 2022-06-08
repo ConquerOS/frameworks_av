@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-//#define LOG_NDEBUG 0
+#define LOG_NDEBUG 0
 #define LOG_TAG "MediaCodecSource"
 #define DEBUG_DRIFT_TIME 0
 
@@ -593,6 +593,10 @@ status_t MediaCodecSource::initEncoder() {
 
         if (err != OK) {
             return err;
+        }
+        if (mEncoder == NULL) {
+            ALOGE("initEncoder : mEncoder is null");
+            return BAD_VALUE;
         }
     }
 

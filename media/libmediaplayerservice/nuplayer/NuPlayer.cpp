@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-//#define LOG_NDEBUG 0
+#define LOG_NDEBUG 0
 #define LOG_TAG "NuPlayer"
 
 #include <inttypes.h>
@@ -1467,6 +1467,9 @@ void NuPlayer::onMessageReceived(const sp<AMessage> &msg) {
                     notifyDriverSeekComplete();
                 }
                 break;
+            }
+            if(mPaused) {
+                mRenderer -> setIsSeekonPause();
             }
 
             mDeferredActions.push_back(

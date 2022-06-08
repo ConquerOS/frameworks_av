@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-//#define LOG_NDEBUG 0
+#define LOG_NDEBUG 0
 #define LOG_TAG "CCodecBufferChannel"
 #include <utils/Log.h>
 
@@ -153,6 +153,7 @@ CCodecBufferChannel::CCodecBufferChannel(
       mMetaMode(MODE_NONE),
       mInputMetEos(false),
       mLastInputBufferAvailableTs(0u),
+      mIsHWDecoder(false),
       mSendEncryptedInfoBuffer(false) {
     mOutputSurface.lock()->maxDequeueBuffers = kSmoothnessFactor + kRenderingDepth;
     {
@@ -187,6 +188,8 @@ void CCodecBufferChannel::setComponent(
     mComponent = component;
     mComponentName = component->getName() + StringPrintf("#%d", int(uintptr_t(component.get()) % 997));
     mName = mComponentName.c_str();
+    std::regex pattern{"c2\\.qti\\..*\\.decoder.*"};
+    mIsHWDecoder = std::regex_match(mComponentName, pattern);
 }
 
 status_t CCodecBufferChannel::setInputSurface(
@@ -721,8 +724,7 @@ void CCodecBufferChannel::feedInputBufferIfAvailable() {
     // limit this WA to qc hw decoder only
     // if feedInputBufferIfAvailableInternal() successfully (has available input buffer),
     // mLastInputBufferAvailableTs would be updated. otherwise, not input buffer available
-    std::regex pattern{"c2\\.qti\\..*\\.decoder.*"};
-    if (std::regex_match(mComponentName, pattern)) {
+    if (mIsHWDecoder) {
         std::lock_guard<std::mutex> tsLock(mTsLock);
         uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                 PipelineWatcher::Clock::now().time_since_epoch()).count();
@@ -758,8 +760,13 @@ void CCodecBufferChannel::feedInputBufferIfAvailableInternal() {
             if (numActiveSlots >= input->numSlots) {
                 break;
             }
+
+            // Control the inputs based on pipelineRoom only for HW decoder
+            if (!mIsHWDecoder) {
+                pipelineRoom = SIZE_MAX;
+            }
             if (pipelineRoom <= input->buffers->numClientBuffers()) {
-                ALOGI("pipelineRoom(%zu) is <= numClientBuffers(%zu). "
+                ALOGV("pipelineRoom(%zu) is <= numClientBuffers(%zu). "
                     "Not signalling any more buffers to client",
                     pipelineRoom, input->buffers->numClientBuffers());
                 break;
@@ -1523,6 +1530,16 @@ status_t CCodecBufferChannel::requestInitialInputBuffers() {
     std::list<std::unique_ptr<C2Work>> flushedConfigs;
     mFlushedConfigs.lock()->swap(flushedConfigs);
     if (!flushedConfigs.empty()) {
+        {
+            Mutexed<PipelineWatcher>::Locked watcher(mPipelineWatcher);
+            PipelineWatcher::Clock::time_point now = PipelineWatcher::Clock::now();
+            for (const std::unique_ptr<C2Work> &work : flushedConfigs) {
+                watcher->onWorkQueued(
+                        work->input.ordinal.frameIndex.peeku(),
+                        std::vector(work->input.buffers),
+                        now);
+            }
+        }
         err = mComponent->queue(&flushedConfigs);
         if (err != C2_OK) {
             ALOGW("[%s] Error while queueing a flushed config", mName);
@@ -1595,41 +1612,45 @@ void CCodecBufferChannel::release() {
     setDescrambler(nullptr);
 }
 
-
 void CCodecBufferChannel::flush(const std::list<std::unique_ptr<C2Work>> &flushedWork) {
     ALOGV("[%s] flush", mName);
-    std::vector<uint64_t> indices;
     std::list<std::unique_ptr<C2Work>> configs;
     mInput.lock()->lastFlushIndex = mFrameIndex.load(std::memory_order_relaxed);
-    for (const std::unique_ptr<C2Work> &work : flushedWork) {
-        indices.push_back(work->input.ordinal.frameIndex.peeku());
-        if (!(work->input.flags & C2FrameData::FLAG_CODEC_CONFIG)) {
-            continue;
+    {
+        Mutexed<PipelineWatcher>::Locked watcher(mPipelineWatcher);
+        for (const std::unique_ptr<C2Work> &work : flushedWork) {
+            uint64_t frameIndex = work->input.ordinal.frameIndex.peeku();
+            if (!(work->input.flags & C2FrameData::FLAG_CODEC_CONFIG)) {
+                watcher->onWorkDone(frameIndex);
+                continue;
+            }
+            if (work->input.buffers.empty()
+                    || work->input.buffers.front() == nullptr
+                    || work->input.buffers.front()->data().linearBlocks().empty()) {
+                ALOGD("[%s] no linear codec config data found", mName);
+                watcher->onWorkDone(frameIndex);
+                continue;
+            }
+            std::unique_ptr<C2Work> copy(new C2Work);
+            copy->input.flags = C2FrameData::flags_t(
+                    work->input.flags | C2FrameData::FLAG_DROP_FRAME);
+            copy->input.ordinal = work->input.ordinal;
+            copy->input.ordinal.frameIndex = mFrameIndex++;
+            for (size_t i = 0; i < work->input.buffers.size(); ++i) {
+                copy->input.buffers.push_back(watcher->onInputBufferReleased(frameIndex, i));
+            }
+            for (const std::unique_ptr<C2Param> &param : work->input.configUpdate) {
+                copy->input.configUpdate.push_back(C2Param::Copy(*param));
+            }
+            copy->input.infoBuffers.insert(
+                    copy->input.infoBuffers.begin(),
+                    work->input.infoBuffers.begin(),
+                    work->input.infoBuffers.end());
+            copy->worklets.emplace_back(new C2Worklet);
+            configs.push_back(std::move(copy));
+            watcher->onWorkDone(frameIndex);
+            ALOGV("[%s] stashed flushed codec config data", mName);
         }
-        if (work->input.buffers.empty()
-                || work->input.buffers.front() == nullptr
-                || work->input.buffers.front()->data().linearBlocks().empty()) {
-            ALOGD("[%s] no linear codec config data found", mName);
-            continue;
-        }
-        std::unique_ptr<C2Work> copy(new C2Work);
-        copy->input.flags = C2FrameData::flags_t(work->input.flags | C2FrameData::FLAG_DROP_FRAME);
-        copy->input.ordinal = work->input.ordinal;
-        copy->input.ordinal.frameIndex = mFrameIndex++;
-        copy->input.buffers.insert(
-                copy->input.buffers.begin(),
-                work->input.buffers.begin(),
-                work->input.buffers.end());
-        for (const std::unique_ptr<C2Param> &param : work->input.configUpdate) {
-            copy->input.configUpdate.push_back(C2Param::Copy(*param));
-        }
-        copy->input.infoBuffers.insert(
-                copy->input.infoBuffers.begin(),
-                work->input.infoBuffers.begin(),
-                work->input.infoBuffers.end());
-        copy->worklets.emplace_back(new C2Worklet);
-        configs.push_back(std::move(copy));
-        ALOGV("[%s] stashed flushed codec config data", mName);
     }
     mFlushedConfigs.lock()->swap(configs);
     {
@@ -1642,12 +1663,6 @@ void CCodecBufferChannel::flush(const std::list<std::unique_ptr<C2Work>> &flushe
         if (output->buffers) {
             output->buffers->flush(flushedWork);
             output->buffers->flushStash();
-        }
-    }
-    {
-        Mutexed<PipelineWatcher>::Locked watcher(mPipelineWatcher);
-        for (uint64_t index : indices) {
-            watcher->onWorkDone(index);
         }
     }
 }
